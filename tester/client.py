@@ -7,7 +7,7 @@ import time
 
 HOST = '127.0.0.1'
 PORT = 22200
-INTERVAL = 0.025
+INTERVAL = 0
 
 keyStateLock = threading.Lock()
 keyState = {
@@ -36,7 +36,7 @@ def connect():
         while not quitFlag:
             curTime = time.time()
             keyStateLock.acquire()
-            speed = (keyState["up"] - keyState["down"]) * 5.0
+            speed = (keyState["up"]) * 5.0
             steer = (keyState["left"] - keyState["right"]) * 1.0
             quitFlag = keyState["q"]
             keyStateLock.release()
@@ -47,7 +47,14 @@ def connect():
                 msg = reader.recv(receive_size)
                 if len(msg) == 4320:
                     received = struct.unpack('1080f', msg)
-                    # print(received[0], received[540], received[1079])
+
+                    reader.setblocking(False)
+                    try:
+                        while reader.recv(receive_size): pass
+                    except BlockingIOError:
+                        pass
+                    reader.setblocking(True)
+
 
             for writer in writers:
                 msg = struct.pack('2f', steer, speed)

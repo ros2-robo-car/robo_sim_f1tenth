@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 FROM ubuntu:20.04
+EXPOSE 22200/tcp
 
 ARG DEBIAN_FRONTEND="noninteractive"
 ENV LIBGL_ALWAYS_INDIRECT=1
@@ -42,7 +43,6 @@ RUN apt-get update --fix-missing && \
                     fontconfig \
                     libfreetype6-dev
 
-RUN pip3 install --upgrade pip
 RUN pip3 install PyOpenGL \
                  PyOpenGL_accelerate
 

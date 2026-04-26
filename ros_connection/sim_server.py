@@ -43,6 +43,10 @@ class sim_server:
             msg = None
             try:
                 msg = self.client.recv(recvSize)
+                self.client.setblocking(False)
+                while self.client.recv(recvSize): pass
+            except BlockingIOError:
+                pass
             except ConnectionError as e:
                 print(f"Connection from {self.client.getsockname()} closed: {e}")
                 self.client = None
@@ -67,7 +71,7 @@ class sim_server:
                         observeSockets.append(self.client)
 
                         msg = struct.pack('If', *[self.send_size, LIDAR_RATE])
-                        sendsize = sendToClient(msg)
+                        sendToClient(msg)
 
                         print(f"connection from {self.client.getsockname()} accepted: ", end='')
                         print(f"{self.send_size} bytes with {LIDAR_RATE}hz")
@@ -84,6 +88,7 @@ class sim_server:
                     msg = receiveFromClient(self.receive_size)
                     try:
                         steer, speed = struct.unpack('2f', msg[0:8])
+                        speed = max(speed, 0.)
                         self.onReceive(steer, speed)
                     except Exception as e:
                         print(f"{e}, msg: {msg}")

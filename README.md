@@ -1,5 +1,26 @@
-![Python 3.8 3.9](https://github.com/f1tenth/f1tenth_gym/actions/workflows/ci.yml/badge.svg)
-![Docker](https://github.com/f1tenth/f1tenth_gym/actions/workflows/docker.yml/badge.svg)
+# F110 GYM ROS 연동
+
+레포지토리 경로에서 아래와 같이 시뮬레이션 서버 실행
+
+```
+docker build -t f110_gym .
+docker create -it -p 22200:22200 --name f110_gym f110_gym
+docker start -ia f110_gym
+python3 main.py
+```
+
+인터럽트(`Ctrl+C`)로 서버 종료
+
+## TODO
+
+- Lap 종료 및 완주 성공/실패 여부 전송하기
+- 그래픽 제거하기
+
+
+***
+
+[Original Repo](https://github.com/f1tenth/f1tenth_gym)
+
 # The F1TENTH Gym environment
 
 This is the repository of the F1TENTH Gym environment.

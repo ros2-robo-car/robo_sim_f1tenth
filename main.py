@@ -3,7 +3,7 @@ import gym
 import numpy as np
 import threading, time
 
-HOST = '127.0.0.1'
+HOST = '0.0.0.0'
 PORT = 22200
 GYMENV = 'f110_gym:f110-v0'
 GYMMAP = 'examples/example_map'
@@ -42,10 +42,10 @@ def sim_gym():
                         num_agents=1, 
                         timestep=0.0125
     )
-    racecar_env.add_render_callback(render_callback)
+    # racecar_env.add_render_callback(render_callback)
 
     obs, step_reward, done, info = racecar_env.reset(np.array([[0., 0., 0.]]))
-    racecar_env.render()
+    # racecar_env.render()
     lap_time = 0.
     print("Simulation Ready")
 
@@ -59,7 +59,7 @@ def sim_gym():
             obs, step_reward, done, info = racecar_env.step(actions)
             lap_time += step_reward
         send_data.set(obs['scans'][0])
-        racecar_env.render()
+        # racecar_env.render()
 
     print("Simulation terminated")
 
