@@ -1,17 +1,17 @@
 import ros_connection
+from ros_connection.packet_formatter import *
 import gym
 import numpy as np
-import threading, time
+import threading
+
+import time # for test sleep
 
 HOST = '0.0.0.0'
 PORT = 22200
 GYMENV = 'f110_gym:f110-v0'
-GYMMAP = 'examples/example_map'
 
-terminated_event = threading.Event()
-
-send_data = ros_connection.lock_list(ros_connection.LIDAR_COUNT)    # LiDAR Data
-recv_data = ros_connection.lock_list(2) # Control Data
+server = ros_connection.sim_server()
+terminate_event = threading.Event()
 
 def render_callback(env_renderer):
     e = env_renderer
@@ -26,22 +26,38 @@ def render_callback(env_renderer):
     e.bottom = bottom - 800
 
 def ros_server():
-    server = ros_connection.sim_server()
-    server.bind(HOST, PORT)
-    server.getLiDARData = send_data.get
-    server.onReceive = lambda steer, speed: recv_data.set([steer, speed])
-    print("Sim Server Ready")
-
-    server.serve(close_event=terminated_event)
-    print("Sim Server Close")
+    server.serve(HOST, PORT, terminate_event)
 
 def sim_gym():
-    racecar_env = gym.make(GYMENV, 
-                        map=GYMMAP, 
-                        map_ext='.png', 
-                        num_agents=1, 
-                        timestep=0.0125
-    )
+    err_response = {
+        'status': STATUS.ERROR,
+        'msg': '',
+        'timestep': 0.0,
+        'flags': 0,
+        'map': ''
+    }
+
+    t, req = unpack(server.recv())
+    if t != MSGTYPE.REQUEST:
+        err_response['msg'] = 'Sim server expected REQUEST packet.'
+        print()
+        msg = pack(MSGTYPE.RESPONSE, err_response)
+        server.send(msg)
+        return
+    
+    try:
+        racecar_env = gym.make(GYMENV, 
+                            map=req['map'], 
+                            map_ext='.png', 
+                            num_agents=1, 
+                            timestep=req['timestep']
+        )
+    except Exception as e:
+        err_response['msg'] = str(e)
+        msg = pack(MSGTYPE.RESPONSE, err_response)
+        server.send(msg)
+        return
+    
     # racecar_env.add_render_callback(render_callback)
 
     obs, step_reward, done, info = racecar_env.reset(np.array([[0., 0., 0.]]))
@@ -49,15 +65,10 @@ def sim_gym():
     lap_time = 0.
     print("Simulation Ready")
 
-    while not terminated_event.is_set():
+    while done:
         actions = np.array([recv_data.get()])
-        if done:
-            obs, step_reward, done, info = racecar_env.reset(np.array([[0., 0., 0.]]))
-            recv_data.set([0., 0.])
-            lap_time = 0.
-        else:
-            obs, step_reward, done, info = racecar_env.step(actions)
-            lap_time += step_reward
+        obs, step_reward, done, info = racecar_env.step(actions)
+        lap_time += step_reward
         send_data.set(obs['scans'][0])
         # racecar_env.render()
 
@@ -72,14 +83,16 @@ if __name__ == '__main__':
     # thread_sim.start()
 
     try:
-        sim_gym()
+        # sim_gym()
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt as e:
         print(f"Interrupted")
     except Exception as e:
         print(f"Exception: {e}")
     finally:
-        terminated_event.set()
-        thread_server.join()
+        terminate_event.set()
+        # thread_server.join()
         # thread_sim.join()
         print("Successfully Terminated")
     
