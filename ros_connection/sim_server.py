@@ -1,10 +1,9 @@
 import struct
 from .constants import *
-from .packet_formatter import pack, unpack
-import queue, asyncio, concurrent.futures
+from .packet_formatter import *
+import queue, asyncio, threading
 
 RECEIVE_UNIT = 8192
-header_parser = struct.Struct('!I')
 
 class sim_server:
 
@@ -12,106 +11,123 @@ class sim_server:
     _client_writer = None
     _send_line = queue.Queue()
     _recv_line = queue.Queue()
+    _gym_online_event = None
     _terminated_event = None
-    # _thread_waitable_pool = concurrent.futures.ThreadPoolExecutor()
+    _recv_thread = None
+    _listening_loop = None
+    
+    def __init__(self, disconnect_event, terminated_event):
+        self._gym_online_event = disconnect_event
+        self._terminated_event = terminated_event
 
     def send(self, msg, block=True):
         self._send_line.put(msg, block)
 
-    def recv(self, block=True):
-        if block:
-            return self._recv_line.get()
-        else:
-            res = None
-            try:
-                res = self._recv_line.get_nowait()
-            except queue.Empty:
-                return res
+    def recv(self, block = True, timeout = None):
+        try:
+            return self._recv_line.get(block, timeout)
+        except queue.Empty:
+            return None
+    
+    def flush(self):
+        self._send_line.mutex.acquire()
+        while self._send_line._qsize() > 0:
+            self._send_line._get()
+        self._send_line.mutex.release()
 
-    def serve(self, host, port, terminate_event):
-        self._terminated_event = terminate_event
+        self._recv_line.mutex.acquire()
+        while self._recv_line._qsize() > 0:
+            self._recv_line._get()
+        self._recv_line.mutex.release()
+
+    def serve(self, host, port):
         asyncio.run(self._serve(host, port))
-        asyncio.create_task(self._wait_for_terminate())
 
     async def _wait_for_terminate(self):
         while not self._terminated_event.is_set():
-            yield None
+            await asyncio.sleep(1)
 
+        self._close_client()
         for task in asyncio.all_tasks():
             task.cancel()
+        self._recv_thread.join()
 
     async def _serve(self, host, port):
-        server = await asyncio.start_server(self._init_sim, host, port)
+        asyncio.create_task(self._wait_for_terminate())
+        self._listening_loop = asyncio.get_running_loop()
+        server = await asyncio.start_server(self._accept, host, port)
         print(f"Sim Server is started on {host}:{port}")
         print("Listening...")
-        await server.serve_forever()
+        try:
+            await server.serve_forever()
+        except asyncio.CancelledError:
+            pass
         print("Sim Server closed.")
 
-    async def _init_sim(self, reader, writer):
+    async def _accept(self, reader, writer):
         if self._client_writer != None and not self._client_writer.is_closing():
-            await self._response_error(writer, 'Another client is using simulation.')
+            await self._response_error('Another client is using simulation.', writer)
             return
         self._client_reader = reader
         self._client_writer = writer
-
-        print('asdf')
 
         try:
             recv_msg = await self._receive_from_client()
             if len(recv_msg) == 0:
                 raise ConnectionError('Disconnect')
-            t, d = unpack(recv_msg)
+            msgtype, _ = unpack(recv_msg)
         except Exception as e:
-            await self._response_error(writer, str(e))
+            await self._response_error(str(e))
             return
 
-        if t != MSGTYPE.REQUEST:
-            await self._response_error(writer, 'Sim server expected REQUEST packet.')
+        if msgtype != MSGTYPE.REQUEST:
+            await self._response_error(f'Expected REQUEST, Received {msgtype.name} ({msgtype})')
             return
-        
-        print('asdf')
 
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(
-            None,
-            self._recv_line.put(recv_msg)
-        )
-        
-        if d['flags'] & SIMFLAGS.ASYNC:
-            loop.run_in_executor(
-                None,
-                self._serve_async_send_to_client
+        self._recv_line.put(recv_msg)
+        asyncio.create_task(self._init_sim())
+
+    async def _init_sim(self):
+        init_sim_res_msg = self._send_line.get()
+        msgtype, init_sim_res = unpack(init_sim_res_msg)
+        if msgtype != MSGTYPE.RESPONSE:
+            await self._response_error(f'Expected RESPONSE, Received {msgtype.name} ({msgtype})')
+            return
+            
+        if init_sim_res['status'] == STATUS.ERROR:
+            await self._response_error(init_sim_res['msg'])
+            return
+
+        if init_sim_res['flags'] & SIMFLAGS.ASYNC:
+            self._recv_thread = threading.Thread(
+                target = asyncio.run,
+                kwargs = {'main': self._serve_async_send_to_client()}
             )
+            self._recv_thread.start()
             asyncio.create_task(
                 self._serve_async_receive_from_client()
             )
         else:
-            loop.run_in_executor(
-                None,
-                asyncio.create_task(self._serve_sync())
+            self._recv_thread = threading.Thread(
+                target = asyncio.run,
+                kwargs = {'main': self._serve_sync()}
             )
-        
-        response = {
-            'status': STATUS.READY,
-            'msg': 'Ready',
-            'timestep': 0.0,
-            'flags': 0,
-            'map': ''
-        }
-        send_msg = pack(MSGTYPE.RESPONSE, response)
-        send_msg = header_parser.pack(len(send_msg)) + send_msg
-        writer.write(send_msg)
-        await writer.drain()
-        print(f"Connection from ${writer.get_extra_info('peername')} accepted")
+            self._recv_thread.start()
 
-    async def _response_error(self, writer, msg: str):
+        send_msg = header_parser.pack(len(init_sim_res_msg)) + init_sim_res_msg
+        self._client_writer.write(send_msg)
+        await self._client_writer.drain()
         
-        print(f"Connection from {writer.get_extra_info('peername')} refused: {msg}")
-        if writer.is_closing():
+        print(f"Connection from {self._client_writer.get_extra_info('peername')} accepted")
+
+
+    async def _response_error(self, msg: str, writer: asyncio.StreamWriter = _client_writer):
+        if self._client_writer.is_closing():
             return
-
+        
+        print(f"Connection from {self._client_writer.get_extra_info('peername')} refused: {msg}")
         err_response = {
-            'status': STATUS.ERROR,
+            'status': STATUS.FAILURE,
             'msg': msg,
             'timestep': 0.0,
             'flags': 0,
@@ -132,29 +148,25 @@ class sim_server:
 
     # thread waitable
     async def _serve_sync(self):
-        print("Sim is ready (sync)")
         while not self._client_writer.is_closing():
             msg = self._send_line.get() # blocked in isolated thread 
-            asyncio.create_task(self._send_to_client(msg))
-            msg = await self._receive_from_client()
+            asyncio.run_coroutine_threadsafe(self._send_to_client(msg), self._listening_loop)
+            future = asyncio.run_coroutine_threadsafe(self._receive_from_client(), self._listening_loop)
+            msg = future.result()
             if len(msg) > 0:
                 self._recv_line.put(msg, False)
-        self._client_writer.wait_closed()
 
     async def _serve_async_receive_from_client(self):
-        print("Sim is ready (async)")
         while not self._client_writer.is_closing():
             msg = await self._receive_from_client()
             if len(msg) > 0:
                 self._recv_line.put(msg, False)
-        self._client_writer.wait_closed()
 
     # thread waitable
-    def _serve_async_send_to_client(self):
+    async def _serve_async_send_to_client(self):
         while not self._client_writer.is_closing():
             msg = self._send_line.get() # blocked in isolated thread 
-            asyncio.create_task(self._send_to_client(msg))
-        self._client_writer.wait_closed()
+            asyncio.run_coroutine_threadsafe(self._send_to_client(msg), self._listening_loop)
 
     async def _send_to_client(self, msg):
         try:
@@ -162,7 +174,9 @@ class sim_server:
             self._client_writer.write(msg)
             await self._client_writer.drain()
         except Exception as e:
-            print(f"Connection from {self._client_writer.get_extra_info('peername')} closed: {e}")
+            if self._gym_online_event.is_set():
+                print(f"Connection from {self._client_writer.get_extra_info('peername')} closed: {e}")
+                self._gym_online_event.clear()
             self._client_writer.close()
 
     async def _receive_from_client(self):
@@ -177,7 +191,9 @@ class sim_server:
             print(f"Expected {e.expected}bytes, Recieved {len(e.partial)}bytes.")
             return b''
         except Exception as e:
-            print(f"Connection from {self._client_writer.get_extra_info('peername')} closed: {e}")
+            if self._gym_online_event.is_set():
+                print(f"Connection from {self._client_writer.get_extra_info('peername')} closed: {e}")
+                self._gym_online_event.clear()
             self._client_writer.close()
             return b''
 

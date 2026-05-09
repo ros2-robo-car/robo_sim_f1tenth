@@ -14,6 +14,7 @@ class STATUS(IntEnum):
     DONE = auto()
     BUSY = auto()
     ERROR = auto()
+    FAILURE = auto()
     MAX = auto()
 
 class SIMFLAGS(IntEnum):
