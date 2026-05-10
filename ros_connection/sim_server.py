@@ -16,8 +16,8 @@ class sim_server:
     _recv_thread = None
     _listening_loop = None
     
-    def __init__(self, disconnect_event, terminated_event):
-        self._gym_online_event = disconnect_event
+    def __init__(self, gym_online_event, terminated_event):
+        self._gym_online_event = gym_online_event
         self._terminated_event = terminated_event
 
     def send(self, msg, block=True):
@@ -148,8 +148,11 @@ class sim_server:
 
     # thread waitable
     async def _serve_sync(self):
-        while not self._client_writer.is_closing():
-            msg = self._send_line.get() # blocked in isolated thread 
+        while self._gym_online_event.is_set():
+            try:
+                msg = self._send_line.get(True, 1.0) # blocked in isolated thread 
+            except queue.Empty:
+                continue
             asyncio.run_coroutine_threadsafe(self._send_to_client(msg), self._listening_loop)
             future = asyncio.run_coroutine_threadsafe(self._receive_from_client(), self._listening_loop)
             msg = future.result()
@@ -157,15 +160,18 @@ class sim_server:
                 self._recv_line.put(msg, False)
 
     async def _serve_async_receive_from_client(self):
-        while not self._client_writer.is_closing():
+        while self._gym_online_event.is_set():
             msg = await self._receive_from_client()
             if len(msg) > 0:
                 self._recv_line.put(msg, False)
 
     # thread waitable
     async def _serve_async_send_to_client(self):
-        while not self._client_writer.is_closing():
-            msg = self._send_line.get() # blocked in isolated thread 
+        while self._gym_online_event.is_set():
+            try:
+                msg = self._send_line.get(True, 1.0) # blocked in isolated thread 
+            except queue.Empty:
+                continue
             asyncio.run_coroutine_threadsafe(self._send_to_client(msg), self._listening_loop)
 
     async def _send_to_client(self, msg):
@@ -174,7 +180,7 @@ class sim_server:
             self._client_writer.write(msg)
             await self._client_writer.drain()
         except Exception as e:
-            if self._gym_online_event.is_set():
+            if not self._client_writer.is_closing():
                 print(f"Connection from {self._client_writer.get_extra_info('peername')} closed: {e}")
                 self._gym_online_event.clear()
             self._client_writer.close()
@@ -191,7 +197,7 @@ class sim_server:
             print(f"Expected {e.expected}bytes, Recieved {len(e.partial)}bytes.")
             return b''
         except Exception as e:
-            if self._gym_online_event.is_set():
+            if not self._client_writer.is_closing():
                 print(f"Connection from {self._client_writer.get_extra_info('peername')} closed: {e}")
                 self._gym_online_event.clear()
             self._client_writer.close()

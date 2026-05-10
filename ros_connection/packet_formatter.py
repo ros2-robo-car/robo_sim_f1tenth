@@ -42,11 +42,13 @@ def unpack(data: bytes) -> tuple[MSGTYPE, dict]:
         type = _type_parser.unpack(data[0:1])[0]
         attr = {}
         if type == MSGTYPE.REQUEST:
+            type = MSGTYPE.REQUEST
             timestep, flags, map = FORMATTER[MSGTYPE.REQUEST].unpack(data[1:])
             attr['timestep'] = timestep
             attr['flags'] = flags
             attr['map'] = map.decode(encoding='ascii').strip('\x00')
         elif type == MSGTYPE.RESPONSE:
+            type = MSGTYPE.RESPONSE
             status, msg, timestep, flags, map = FORMATTER[MSGTYPE.RESPONSE].unpack(data[1:])
             attr['status'] = status
             attr['msg'] = msg.decode(encoding='ascii').strip('\x00')
@@ -54,10 +56,12 @@ def unpack(data: bytes) -> tuple[MSGTYPE, dict]:
             attr['flags'] = flags
             attr['map'] = map.decode(encoding='ascii').strip('\x00')
         elif type == MSGTYPE.SEND:
+            type = MSGTYPE.SEND
             steer, speed = FORMATTER[MSGTYPE.SEND].unpack(data[1:])
             attr['steer'] = steer
             attr['speed'] = speed
         elif type == MSGTYPE.RECV:
+            type = MSGTYPE.RECV
             parsed = FORMATTER[MSGTYPE.RECV].unpack(data[1:])
             status, msg, egoidx = parsed[0], parsed[1], parsed[2]
             scans, poses, vels = parsed[3:1083], parsed[1083:1086], parsed[1086:1089]

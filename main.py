@@ -110,7 +110,7 @@ def loop_gym(req):
                     print(f'Expected SEND, Received {msgtype.name} ({msgtype})')
                     continue
             else:
-                if flag_sync:
+                if flag_sync and lap_time > 0.0:
                     continue
                 else:
                     action = [ [0, 0] ]
