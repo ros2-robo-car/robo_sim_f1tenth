@@ -2,8 +2,9 @@ import ros_connection
 from ros_connection.constants import *
 from ros_connection.packet_formatter import *
 import numpy as np, gym
+import threading, time
 import traceback
-import threading
+
 
 
 HOST = '0.0.0.0'
@@ -13,19 +14,12 @@ MAP_PATH = 'gym/f110_gym/envs/maps/'
 
 RENDERING = False
 RECV_TIMEOUT = 1
+TIMEOUT = 30
 
 gym_online_event = threading.Event()
+client_online_event = threading.Event()
 terminated_event = threading.Event()
-server = ros_connection.sim_server(gym_online_event, terminated_event)
-
-
-res = {
-    'status': STATUS.READY,
-    'msg': '',
-    'timestep': 0.0,
-    'flags': 0,
-    'map': ''
-}
+server = ros_connection.sim_server(gym_online_event, client_online_event, terminated_event)
 
 def flat_obs(obs: dict):
     ego_idx = obs['ego_idx']
@@ -47,39 +41,75 @@ def render_callback(env_renderer):
 def ros_server():
     server.serve(HOST, PORT)
 
-def listen_and_loop_gym():
-    recv = None
-    while recv == None:
+def listen_and_loop():
+    init_res = {
+        'status': STATUS.READY,
+        'msg': ''
+    }
+
+    init_req_raw = server.recv(True, 1)
+    while init_req_raw == None:
+        init_req_raw = server.recv(True, 1)
+
+    msgtype = get_type(init_req_raw)
+    if msgtype != MSGTYPE.INIT_REQUEST:
+        init_res = {
+            'status': STATUS.ERROR,
+            'msg': f'Expected INIT_REQUESET, Received {msgtype.name} ({msgtype})'
+        }
+        print(init_res['msg'])
+        init_res_raw = pack(MSGTYPE.INIT_RESPONSE, init_res)
+        server.send(init_res_raw)
+        return
+    
+    init_res_raw = pack(MSGTYPE.INIT_RESPONSE, init_res)
+    server.send(init_res_raw)
+
+    while client_online_event.is_set():
+        run_gym()
+
+def run_gym():
+    recv = server.recv(True, 1)
+    while recv == None and client_online_event.is_set():
         recv = server.recv(True, 1)
 
-    msgtype, req = unpack(recv)
-    if msgtype != MSGTYPE.REQUEST:
-        print(f'Expected REQUESET, Received {msgtype.name} ({msgtype})')
+    start_res = {
+        'status': STATUS.RUNNING,
+        'msg': '',
+        'timestep': 0.0,
+        'flags': 0,
+        'map': ''
+    }
+    try:
+        msgtype, start_req = unpack(recv)
+        if msgtype != MSGTYPE.START_REQUEST:
+            raise Exception(f'Expected START_REQUESET, Received {msgtype.name} ({msgtype})')
+    except Exception as e:
+        start_res['status'] = STATUS.ERROR
+        start_res['msg'] = str(e)
+        start_res_raw = pack(MSGTYPE.START_RESPONSE, start_res)
+        server.send(start_res_raw)
         return
-
-    loop_gym(req)
-    print("F110 gym closed.")
-
-def loop_gym(req):
-    res = {}
-    res['timestep'] = req['timestep']
-    res['flags'] = req['flags']
-    res['map'] = req['map']
+    
+    start_res['timestep'] = start_req['timestep']
+    start_res['flags'] = start_req['flags']
+    start_res['map'] = start_req['map']
 
     try:
-        print(f"Preparing F110 gym... (map: {req['map']}, timestep: {req['timestep']})")
+        print(f"Preparing F110 gym... (map: {start_req['map']}, timestep: {start_req['timestep']})")
         racecar_env = gym.make(GYMENV, 
-                            map=MAP_PATH + req['map'], 
+                            map=MAP_PATH + start_req['map'], 
                             map_ext='.png', 
                             num_agents=1, 
-                            timestep=req['timestep']
+                            timestep=start_req['timestep']
         )
     except Exception as e:
         print(e)
-        res['status'] = STATUS.FAILURE
-        res['msg'] = str(e)
-        response = pack(MSGTYPE.RESPONSE, res)
-        server.send(response)
+        start_res['status'] = STATUS.FAILURE
+        start_res['msg'] = str(e)
+        start_res_raw = pack(MSGTYPE.START_RESPONSE, start_res)
+        client_online_event.clear()
+        server.send(start_res_raw)
         return
     
     gym_online_event.set()
@@ -91,12 +121,12 @@ def loop_gym(req):
         racecar_env.add_render_callback(render_callback)
         racecar_env.render()
 
-    res['status'] = STATUS.READY
-    res['msg'] = 'Ready'
-    response = pack(MSGTYPE.RESPONSE, res)
-    server.send(response)
+    start_res['status'] = STATUS.RUNNING
+    start_res['msg'] = 'Ready'
+    start_res_raw = pack(MSGTYPE.START_RESPONSE, start_res)
+    server.send(start_res_raw)
 
-    flag_sync = not (req['flags'] & SIMFLAGS.ASYNC)
+    flag_sync = not (start_req['flags'] & SIMFLAGS.ASYNC)
     flags_str = 'Sync' if flag_sync else 'Async'
     print(f"F110 gym is Ready ({flags_str})")
 
@@ -105,10 +135,9 @@ def loop_gym(req):
             recv = server.recv(flag_sync, RECV_TIMEOUT)
             if recv != None:
                 msgtype, act = unpack(recv)
-                action = [ [act['steer'], act['speed']] ]
                 if msgtype != MSGTYPE.SEND:
-                    print(f'Expected SEND, Received {msgtype.name} ({msgtype})')
-                    continue
+                    raise Exception(f'Expected SEND, Received {msgtype.name} ({msgtype})')
+                action = [ [act['steer'], act['speed']] ]
             else:
                 if flag_sync and lap_time > 0.0:
                     continue
@@ -122,28 +151,30 @@ def loop_gym(req):
             if RENDERING:
                 racecar_env.render()
 
-            response = {
+            send = {
                 'status': STATUS.RUNNING if not done else STATUS.DONE,
                 'msg': '',
                 'elapsed_time': lap_time
             }
-            response |= obs
-            res = pack(MSGTYPE.RECV, response)
-            server.send(res, flag_sync)
+            send |= obs
+            send_raw = pack(MSGTYPE.RECV, send)
+            server.send(send_raw, flag_sync)
 
         except Exception as e:
             print(f"Error: \n{traceback.format_exc()}")
-            response = {
+            send = {
                 'status': STATUS.ERROR,
                 'msg': str(e),
                 'elapsed_time': lap_time
             }
-            response |= obs
-            res = pack(MSGTYPE.RECV, response)
-            server.send(res, flag_sync)
+            send |= obs
+            send_raw = pack(MSGTYPE.RECV, send)
+            server.send(send_raw, flag_sync)
     
     racecar_env.close()
     gym_online_event.clear()
+
+    print("F110 gym closed.")
 
 if __name__ == '__main__':
 
@@ -155,8 +186,7 @@ if __name__ == '__main__':
 
     try:
         while True:
-            server.flush()
-            listen_and_loop_gym()
+            listen_and_loop()
     except KeyboardInterrupt as e:
         print(f"Interrupted")
     except Exception as e:
