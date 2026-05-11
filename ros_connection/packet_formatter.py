@@ -1,7 +1,8 @@
 from .constants import *
 
 _type_parser = struct.Struct('!B')
-header_parser = struct.Struct('!I')
+header_parser = struct.Struct('!II')
+UINT_MAX = (1 << 32) - 1
 
 def pack(type: MSGTYPE, attr: dict) -> bytes:
     try:

@@ -1,6 +1,6 @@
 from .constants import *
 from .packet_formatter import *
-import queue, asyncio, threading, time
+import heapq, queue, asyncio, threading, time
 
 RECEIVE_UNIT = 8192
 
@@ -11,7 +11,10 @@ class sim_server:
     _client_timeout = 30
 
     _send_line = queue.Queue()
+    _latest_send_id = 0
     _recv_line = queue.Queue()
+    _latest_recv_id = 0
+    _recv_stash = []
 
     _gym_online_event = None
     _client_online_event = None
@@ -30,7 +33,10 @@ class sim_server:
 
     def recv(self, block = True, timeout = None):
         try:
-            return self._recv_line.get(block, timeout)
+            msg = self._recv_line.get(block, timeout)
+            if get_type(msg) != MSGTYPE.SEND:
+                print(f"recv: {get_type(msg).name}")
+            return msg
         except queue.Empty:
             return None
     
@@ -42,6 +48,10 @@ class sim_server:
         with self._recv_line.mutex:
             while self._recv_line._qsize() > 0:
                 self._recv_line._get()
+        
+        self._latest_send_id = 0
+        self._latest_recv_id = 0
+        self._recv_stash.clear()
 
     def serve(self, host, port):
         asyncio.run(self._serve(host, port))
@@ -237,6 +247,7 @@ class sim_server:
             except queue.Empty:
                 continue
             asyncio.run_coroutine_threadsafe(self._send_to_client(msg), self._listening_loop)
+
             future = asyncio.run_coroutine_threadsafe(self._receive_from_client(), self._listening_loop)
             msg = future.result()
             if len(msg) > 0:
@@ -261,20 +272,32 @@ class sim_server:
 
     async def _send_to_client(self, msg):
         try:
-            msg = header_parser.pack(len(msg)) + msg
+            msg = header_parser.pack(len(msg), self._latest_send_id) + msg
             self._client_writer.write(msg)
             await self._client_writer.drain()
+            self._latest_send_id = (self._latest_send_id + 1) % (UINT_MAX + 1)
         except Exception as e:
             await self._close_client(e)
 
     async def _receive_from_client(self):
         try:
-            recv = await self._client_reader.read(4)
-            if len(recv) == 0:
-                raise ConnectionError('Disconnect')
-            msglen = header_parser.unpack(recv)[0]
-            msg = await self._client_reader.readexactly(msglen)
-            return msg
+            # assure sequence
+            while True:
+                if self._recv_stash[0][0] == self._latest_recv_id:
+                    return heapq.heappop(self._recv_stash)[1]
+                
+                recv = await self._client_reader.read(8)
+                if len(recv) == 0:
+                    raise ConnectionError('Disconnect')
+                
+                msglen, msgid = header_parser.unpack(recv)
+                msg = await self._client_reader.readexactly(msglen)
+                if msgid == self._latest_recv_id:
+                    self._latest_recv_id = (self._latest_recv_id + 1) % (UINT_MAX + 1)
+                    return msg
+                else:
+                    heapq.heappush(self._recv_stash, (msgid, msg))
+
         except asyncio.IncompleteReadError as e:
             print(f"Expected {e.expected}bytes, Recieved {len(e.partial)}bytes.")
             return b''
