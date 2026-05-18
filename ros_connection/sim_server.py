@@ -267,10 +267,10 @@ class sim_server:
         try:
             start_res = self._from_server_line[MSGTYPE.START_RESPONSE].get(timeout=self._client_timeout)
             if start_res['status'] == STATUS.FAILURE:
-                self._err_line.put(e)
+                self._err_line.put(start_res['msg'])
                 return STATUS.FAILURE
             if start_res['status'] == STATUS.ERROR:
-                self._err_line.put(e)
+                self._err_line.put(start_res['msg'])
                 return STATUS.ERROR
 
             if start_res['flags'] & SIMFLAGS.ASYNC:
@@ -355,6 +355,8 @@ class sim_server:
                 raise ConnectionError('Disconnect')
             
             msglen, msgid = header_parser.unpack(recv)
+            if msglen == 0:
+                raise ConnectionError('Disconnect')
             msg = await self._client_reader.readexactly(msglen)
             if msgid == self._latest_recv_id:
                 self._latest_recv_id = (self._latest_recv_id + 1) % (UINT_MAX + 1)
